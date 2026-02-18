@@ -27,15 +27,14 @@ def build_model(X: pd.DataFrame) -> Pipeline:
         ]
     )
 
-    model = RandomForestClassifier(
-        n_estimators=400,
-        max_depth=18,
-        min_samples_leaf=2,
-        random_state=42,
-        class_weight="balanced_subsample",
-    )
+    model = RandomForestClassifier(n_estimators=300, random_state=42, class_weight="balanced")
 
-    return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+    return Pipeline(
+        steps=[
+            ("preprocess", preprocessor),
+            ("model", model),
+        ]
+    )
 
 
 def train_and_evaluate(
@@ -55,15 +54,8 @@ def train_and_evaluate(
     X = df[dataset.feature_columns]
     y = df[dataset.target_column]
 
-    label_counts = y.value_counts()
-    stratify = y if (label_counts.min() >= 2 and len(label_counts) > 1) else None
-
     X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=42,
-        stratify=stratify,
+        X, y, test_size=test_size, random_state=42, stratify=y
     )
 
     pipeline = build_model(X)
@@ -71,7 +63,7 @@ def train_and_evaluate(
 
     predictions = pipeline.predict(X_test)
     accuracy = accuracy_score(y_test, predictions)
-    report = classification_report(y_test, predictions, output_dict=True, zero_division=0)
+    report = classification_report(y_test, predictions, output_dict=True)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / "incentive_recommender.joblib"
@@ -82,7 +74,6 @@ def train_and_evaluate(
             "pipeline": pipeline,
             "feature_columns": dataset.feature_columns,
             "target_column": dataset.target_column,
-            "class_labels": sorted(y.unique().tolist()),
         },
         model_path,
     )
@@ -90,7 +81,6 @@ def train_and_evaluate(
     metrics = {
         "accuracy": accuracy,
         "classification_report": report,
-        "class_distribution": label_counts.to_dict(),
         "train_rows": len(X_train),
         "test_rows": len(X_test),
     }

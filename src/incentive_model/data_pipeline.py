@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple
 
 import pandas as pd
 
@@ -23,37 +24,44 @@ def _validate_columns(df: pd.DataFrame, required: set[str], name: str) -> None:
         raise ValueError(f"{name} missing columns: {sorted(missing)}")
 
 
-def _normalize_strings(df: pd.DataFrame) -> pd.DataFrame:
-    for col in df.select_dtypes(include="object").columns:
-        df[col] = df[col].astype(str).str.strip()
-    return df
-
-
-def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            fill_val = df[col].median() if not df[col].dropna().empty else 0
-            df[col] = df[col].fillna(fill_val)
-        else:
-            mode_val = df[col].mode()
-            df[col] = df[col].fillna(mode_val.iloc[0] if not mode_val.empty else "unknown")
-    return df
-
-
 def clean_data(
     incentive_df: pd.DataFrame,
     property_df: pd.DataFrame,
     behavior_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Basic cleaning and schema checks for all raw datasets."""
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Basic cleaning for all raw datasets."""
     _validate_columns(incentive_df, REQUIRED_INCENTIVE_COLUMNS, "Raw incentive data")
     _validate_columns(property_df, REQUIRED_PROPERTY_COLUMNS, "Raw property data")
     _validate_columns(behavior_df, REQUIRED_BEHAVIOR_COLUMNS, "User behavior data")
 
-    incentive_df = _fill_missing(_normalize_strings(incentive_df.copy().drop_duplicates()))
-    property_df = _fill_missing(_normalize_strings(property_df.copy().drop_duplicates()))
-    behavior_df = _fill_missing(_normalize_strings(behavior_df.copy().drop_duplicates()))
-    return incentive_df, property_df, behavior_df
+    incentive_df = incentive_df.copy()
+    property_df = property_df.copy()
+    behavior_df = behavior_df.copy()
+
+    for df in (incentive_df, property_df, behavior_df):
+        df.drop_duplicates(inplace=True)
+
+    # Standardize string columns
+    for col in incentive_df.select_dtypes(include="object").columns:
+        incentive_df[col] = incentive_df[col].str.strip()
+
+    for col in property_df.select_dtypes(include="object").columns:
+        property_df[col] = property_df[col].str.strip()
+
+    for col in behavior_df.select_dtypes(include="object").columns:
+        behavior_df[col] = behavior_df[col].str.strip()
+
+    # Fill null numerics with median and categoricals with mode
+    def fill_missing(df: pd.DataFrame) -> pd.DataFrame:
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                mode_val = df[col].mode()
+                df[col] = df[col].fillna(mode_val.iloc[0] if not mode_val.empty else "unknown")
+        return df
+
+    return fill_missing(incentive_df), fill_missing(property_df), fill_missing(behavior_df)
 
 
 def feature_engineering(
@@ -61,26 +69,30 @@ def feature_engineering(
     property_df: pd.DataFrame,
     behavior_df: pd.DataFrame,
 ) -> PipelineData:
-    """Build training features without leaking target label information."""
-    merged = behavior_df.merge(property_df, on=["owner_id", "property_id"], how="left")
-
-    # Global incentive context features (available at both train and inference time)
-    merged["global_avg_incentive_amount"] = float(incentive_df["incentive_amount"].mean())
-    merged["global_max_incentive_amount"] = float(incentive_df["incentive_amount"].max())
-    merged["global_min_incentive_amount"] = float(incentive_df["incentive_amount"].min())
-    merged["available_program_count"] = int(incentive_df["incentive_program"].nunique())
-
-    # Owner-level historical behavior aggregates
-    owner_stats = (
-        behavior_df.groupby("owner_id", as_index=False)["engagement_score"]
-        .agg(owner_avg_engagement="mean", owner_max_engagement="max", owner_interaction_count="count")
+    """Merge and engineer features for model training."""
+    incentives_by_program = (
+        incentive_df.groupby("incentive_program", as_index=False)["incentive_amount"]
+        .mean()
+        .rename(columns={"incentive_amount": "avg_program_incentive_amount"})
     )
-    merged = merged.merge(owner_stats, on="owner_id", how="left")
 
-    # Interaction key used by inference fallback logic
+    merged = behavior_df.merge(property_df, on=["owner_id", "property_id"], how="left")
+    merged = merged.merge(
+        incentives_by_program,
+        left_on="ideal_incentive_program",
+        right_on="incentive_program",
+        how="left",
+    )
+
+    merged["avg_program_incentive_amount"] = merged["avg_program_incentive_amount"].fillna(
+        incentives_by_program["avg_program_incentive_amount"].median()
+    )
+
     merged["owner_property_interaction"] = merged["owner_id"].astype(str) + "_" + merged["property_id"].astype(str)
 
-    training_df = _fill_missing(merged)
+    drop_cols = ["incentive_program"] if "incentive_program" in merged.columns else []
+    training_df = merged.drop(columns=drop_cols)
+
     feature_columns = [c for c in training_df.columns if c != "ideal_incentive_program"]
     return PipelineData(training_df=training_df, feature_columns=feature_columns)
 

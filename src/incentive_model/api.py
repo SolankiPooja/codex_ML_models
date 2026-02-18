@@ -15,32 +15,7 @@ class RecommendationRequest(BaseModel):
     features: dict[str, Any]
 
 
-app = FastAPI(title="Incentive Recommendation API", version="1.1.0")
-
-
-def _prepare_features(raw_features: dict[str, Any], feature_columns: list[str]) -> dict[str, Any]:
-    prepared = dict(raw_features)
-
-    # Convenience fallback for common derived feature.
-    if (
-        "owner_property_interaction" in feature_columns
-        and "owner_property_interaction" not in prepared
-        and "owner_id" in prepared
-        and "property_id" in prepared
-    ):
-        prepared["owner_property_interaction"] = f"{prepared['owner_id']}_{prepared['property_id']}"
-
-    missing_features = [col for col in feature_columns if col not in prepared]
-    if missing_features:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Missing required features",
-                "missing_features": missing_features,
-            },
-        )
-
-    return prepared
+app = FastAPI(title="Incentive Recommendation API", version="1.0.0")
 
 
 @app.on_event("startup")
@@ -61,19 +36,26 @@ def health() -> dict[str, str]:
 @app.post("/recommend")
 def recommend(req: RecommendationRequest) -> dict[str, Any]:
     feature_columns = app.state.feature_columns
-    prepared = _prepare_features(req.features, feature_columns)
 
-    input_df = pd.DataFrame([prepared])[feature_columns]
+    missing_features = [col for col in feature_columns if col not in req.features]
+    if missing_features:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required features: {missing_features}",
+        )
+
+    input_df = pd.DataFrame([req.features])[feature_columns]
     pipeline = app.state.pipeline
 
     prediction = pipeline.predict(input_df)[0]
+
     response: dict[str, Any] = {"recommended_incentive_program": prediction}
 
-    if hasattr(pipeline, "predict_proba") and hasattr(pipeline, "classes_"):
+    if hasattr(pipeline, "predict_proba"):
         probs = pipeline.predict_proba(input_df)[0]
         labels = pipeline.classes_
         response["class_probabilities"] = {
-            str(label): float(prob) for label, prob in zip(labels, probs)
+            label: float(prob) for label, prob in zip(labels, probs)
         }
 
     return response
